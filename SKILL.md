@@ -18,6 +18,7 @@ Use the bundled scripts for explicit one-shot terminal input and optional manage
 
 - Require an already authenticated VS Code Remote SSH window.
 - Require the currently selected integrated terminal to be visible, idle, and empty for `Run`, `Paste`, `Start`, and `Prepare`. For `Submit`, require the exact previously prepared line to remain present and unchanged. The scripts confirm that an existing terminal input control is present but cannot determine shell state.
+- With split terminal panes, require the intended pane to have keyboard focus before invocation. Use that focused pane; when only one pane is visible, use it directly. If multiple panes are visible and none is uniquely focused, stop without sending input and ask the user to focus the intended pane.
 - Stop for a locked desktop, authentication dialog, uncertain target window, or permission/security prompt.
 - Keep commands single-line. Never place passwords, tokens, or other sensitive values in a command unless the user explicitly approved that exact transmission.
 - For monitoring mode, require a Linux-like remote shell with `bash`, `base64`, and `nohup`, plus working VS Code terminal shell integration. If the non-visual result bridge cannot verify its sentinel, fail closed and report that monitoring is unavailable.
@@ -131,14 +132,14 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File "<skill>/scripts/vs
 
 - Scan visible VS Code windows and accept only titles containing both `[SSH:` and `Visual Studio Code`.
 - Auto-select exactly one matching window. Fail closed when none or multiple are available; never guess between servers.
-- Focus the selected window's existing `xterm` input control directly through Windows UI Automation. Never create a terminal or switch terminal tabs.
+- Select the existing `xterm` input that already has keyboard focus. Fall back to the sole visible terminal only when exactly one exists. Never choose the first pane by enumeration, create a terminal, or switch terminal tabs.
 - In one-shot mode, `Run` pastes and submits, `Paste` does not press Enter, and `Submit` presses Enter without re-pasting.
 - In monitoring mode, `Start` creates a private managed run directory and launches one background runner. `Prepare` pastes the same wrapper without Enter, `Submit` submits that already-prepared wrapper only after confirmation, and `Poll` reads only the managed directory.
 - Managed `Start` and `Prepare` visibly paste a Base64-encoded bootstrap line. It can be long; this is expected transport, not terminal output or a second training launch. The terminal remains reserved until monitoring ends.
 - Before every system-wide keystroke, require the exact recorded VS Code window handle to still be the foreground window. A matching title alone is insufficient. If focus changes, fail immediately and send no further keys.
 - `Poll` includes a fresh probe ID and accepts copied output only when the run ID, probe ID, and both sentinels match. It invokes Copy Last Command Output once and never retries the UI transfer automatically.
 - Never interpret screenshots, terminal layout, scrolling, or visible-page text. The clipboard transfer is only a transport for result-file content and must be restored after every poll.
-- Never open the Command Palette in one-shot mode. Monitoring `Poll` may open it only to invoke Copy Last Command Output; it must not invoke any other command.
+- Never open the Command Palette in one-shot mode. Monitoring `Poll` may open it only to invoke Copy Last Command Output. Before pasting the command label and again before pressing Enter, verify that the focused element is the same enabled Command Palette edit control inside the exact target VS Code window.
 - Every local script invocation is one-shot and exits. Monitoring leaves no local hook, service, or watcher running.
 - Treat drive letters, UNC paths, mounted directories, usernames, hosts, and project paths as per-request runtime values. Never persist environment-specific values in this skill. The selected VS Code Remote SSH server is the authority for commands and results. A local mapping to that same server may be used as a read-only result bridge only when it is supplied or verified at runtime; never assume or hard-code a drive letter or mapped path. Otherwise, read the portable managed result files under the remote user's home directory.
 - Use `-DryRun` to validate arguments and generated metadata without activating a window or sending input.

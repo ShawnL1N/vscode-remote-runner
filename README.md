@@ -69,6 +69,7 @@ Do not use this skill when:
 - A standard Visual Studio Code window already connected through Remote SSH.
 - A window title containing both `[SSH: ...]` and `Visual Studio Code`.
 - A visible, selected, idle integrated terminal with an empty input line.
+- When terminal panes are split, the intended pane must already have keyboard focus. If several panes are visible and none is uniquely focused, the skill fails closed instead of selecting the first pane it finds.
 - Local access to Windows PowerShell, Windows UI Automation, and the clipboard.
 
 ### Built-in managed monitoring
@@ -241,6 +242,7 @@ This mode temporarily reserves the selected terminal as a polling channel. Do no
 - It never treats screenshots, terminal layout, or scrollback as execution evidence.
 - It fails closed when more than one SSH window is available and no target is specified.
 - Before every system-wide keystroke, it verifies that the exact recorded VS Code window handle is still the foreground window; a matching title alone is not enough.
+- During managed polling, it also verifies that the same enabled Command Palette input remains focused before pasting the command label and before pressing Enter.
 - It accepts only a single-line command by default.
 - It restores the original clipboard after each operation.
 - High-risk commands require paste-only review and a new explicit confirmation before submission.

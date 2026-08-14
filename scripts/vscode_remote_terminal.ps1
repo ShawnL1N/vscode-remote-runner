@@ -145,16 +145,27 @@ $terminalElements = $root.FindAll(
     [System.Windows.Automation.TreeScope]::Descendants,
     $terminalCondition
 )
-$terminalInput = $null
+$visibleTerminalInputs = @()
 for ($index = 0; $index -lt $terminalElements.Count; $index++) {
     $candidate = $terminalElements.Item($index)
     if ($candidate.Current.IsEnabled -and -not $candidate.Current.IsOffscreen) {
-        $terminalInput = $candidate
-        break
+        $visibleTerminalInputs += $candidate
     }
 }
-if ($null -eq $terminalInput) {
+if ($visibleTerminalInputs.Count -eq 0) {
     throw 'No visible existing terminal input was found. The skill will not create one.'
+}
+$focusedTerminalInputs = @(
+    $visibleTerminalInputs | Where-Object { $_.Current.HasKeyboardFocus }
+)
+if ($focusedTerminalInputs.Count -eq 1) {
+    $terminalInput = $focusedTerminalInputs[0]
+    $terminalSelection = 'focused_terminal'
+} elseif ($visibleTerminalInputs.Count -eq 1) {
+    $terminalInput = $visibleTerminalInputs[0]
+    $terminalSelection = 'sole_visible_terminal'
+} else {
+    throw 'Multiple visible terminal panes were found, but none was uniquely focused. Focus the terminal you want to use and try again. Nothing was sent.'
 }
 $terminalInput.SetFocus()
 Start-Sleep -Milliseconds $DelayMilliseconds
@@ -191,6 +202,8 @@ try {
     action = $Action
     window_title = $resolvedWindowTitle
     window_handle = $resolvedWindowHandle.ToInt64()
+    terminal_selection = $terminalSelection
+    visible_terminal_count = $visibleTerminalInputs.Count
     terminal_mode = 'existing_only'
     command_length = if ($null -eq $Command) { 0 } else { $Command.Length }
 } | ConvertTo-Json -Compress
