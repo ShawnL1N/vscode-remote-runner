@@ -7,6 +7,21 @@ The current version supports two modes:
 - **One-shot execution (default):** Enter one command, press Enter by default, and exit immediately.
 - **Managed monitoring (explicit opt-in only):** Start a background job, create managed result files, and poll until the job completes or fails.
 
+## Why Use It Instead of Direct Codex SSH?
+
+Compared with giving Codex its own direct SSH connection, this skill provides a narrower and more user-controlled bridge:
+
+- **No separate server credentials are entrusted to Codex.** The skill reuses the VS Code Remote SSH session that the user has already authenticated, instead of giving Codex a password, private key, SSH agent, or independent login configuration.
+- **Codex cannot independently reconnect later.** Closing the VS Code SSH session removes the bridge; the skill does not retain a reusable path into the server.
+- **Existing access controls are preserved.** The connection can continue to use the user's approved VS Code setup, jump host, MFA flow, or other organization-specific login process without reproducing that authentication inside Codex.
+- **Commands remain visible and interruptible.** Submitted commands appear in the selected terminal, so the user can inspect, stop, or take over the session using familiar VS Code controls.
+- **The default authority is intentionally narrow.** One-shot mode enters only the explicitly requested command into the currently selected terminal. It does not create a new terminal, choose another server, or obtain unrestricted remote-shell access on its own.
+- **Less connection setup is required.** There is no need to configure a separate Codex SSH client, copy keys into the Codex environment, expose another remote entry path, or install a server-side agent.
+- **It can bridge local sandbox or network restrictions.** If Codex cannot establish its own SSH connection but VS Code Remote SSH is already connected, Codex can still submit the requested terminal command through the existing desktop session.
+- **It works across different Remote SSH servers.** Window detection does not hard-code a username, hostname, IP address, project path, or specific server.
+
+This is not a universal replacement for direct SSH. Direct SSH is more reliable for unattended automation, interactive shell workflows, large file transfers, and high-volume command execution. This skill is most useful when credential isolation, explicit user control, and reuse of an existing VS Code session matter more than maximum automation reliability.
+
 ## 1. How It Works
 
 ```text
