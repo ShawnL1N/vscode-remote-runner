@@ -31,6 +31,8 @@ $terminalScript = Join-Path $PSScriptRoot 'vscode_remote_terminal.ps1'
 $runIdPattern = '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 $sshWindowPattern = '\[SSH:[^\]]+\].*Visual Studio Code'
 
+Add-Type -AssemblyName UIAutomationClient
+
 Add-Type @'
 using System;
 using System.Runtime.InteropServices;
@@ -62,6 +64,44 @@ function Assert-MonitorForegroundWindow {
     if ([VscodeRemoteMonitorForegroundGuard]::GetForegroundWindow() -ne $WindowHandle) {
         throw 'Foreground-window ownership changed during result retrieval. No further keys were sent.'
     }
+}
+
+function Test-ElementInsideWindow {
+    param(
+        [object]$Element,
+        [object]$WindowRoot
+    )
+
+    $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+    $current = $Element
+    for ($depth = 0; $depth -lt 128 -and $null -ne $current; $depth++) {
+        if ([System.Windows.Automation.Automation]::Compare($current, $WindowRoot)) {
+            return $true
+        }
+        $current = $walker.GetParent($current)
+    }
+    return $false
+}
+
+function Get-VerifiedCommandPaletteInput {
+    param(
+        [IntPtr]$WindowHandle,
+        [object]$WindowRoot
+    )
+
+    Assert-MonitorForegroundWindow -WindowHandle $WindowHandle
+    $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+    if (
+        $null -eq $focused -or
+        -not (Test-ElementInsideWindow -Element $focused -WindowRoot $WindowRoot) -or
+        $focused.Current.ControlType -ne [System.Windows.Automation.ControlType]::Edit -or
+        $focused.Current.ClassName -eq 'xterm-helper-textarea' -or
+        -not $focused.Current.IsEnabled -or
+        $focused.Current.IsOffscreen
+    ) {
+        throw 'The VS Code Command Palette input was not focused. No command label was pasted or submitted.'
+    }
+    return $focused
 }
 
 function ConvertTo-Base64Utf8 {
@@ -190,6 +230,9 @@ function Copy-LastCommandOutput {
     }
 
     Set-VerifiedMonitorForegroundWindow -WindowHandle $ResolvedWindowHandle
+    $windowRoot = [System.Windows.Automation.AutomationElement]::FromHandle(
+        $ResolvedWindowHandle
+    )
 
     Add-Type -AssemblyName System.Windows.Forms
     $originalClipboard = [System.Windows.Forms.Clipboard]::GetDataObject()
@@ -198,14 +241,24 @@ function Copy-LastCommandOutput {
     $probePattern = '(?m)^probe_id=' + [regex]::Escape($ExpectedProbeId) + '\r?$'
     $keyboard = New-Object -ComObject WScript.Shell
     try {
-        [System.Windows.Forms.Clipboard]::SetText($CopyCommandLabel)
         Assert-MonitorForegroundWindow -WindowHandle $ResolvedWindowHandle
         $keyboard.SendKeys('{F1}')
         Start-Sleep -Milliseconds 500
-        Assert-MonitorForegroundWindow -WindowHandle $ResolvedWindowHandle
+        $paletteInput = Get-VerifiedCommandPaletteInput `
+            -WindowHandle $ResolvedWindowHandle `
+            -WindowRoot $windowRoot
+        [System.Windows.Forms.Clipboard]::SetText($CopyCommandLabel)
         $keyboard.SendKeys('^v')
         Start-Sleep -Milliseconds 700
-        Assert-MonitorForegroundWindow -WindowHandle $ResolvedWindowHandle
+        $currentPaletteInput = Get-VerifiedCommandPaletteInput `
+            -WindowHandle $ResolvedWindowHandle `
+            -WindowRoot $windowRoot
+        if (-not [System.Windows.Automation.Automation]::Compare(
+            $paletteInput,
+            $currentPaletteInput
+        )) {
+            throw 'Command Palette focus changed before submission. Enter was not sent.'
+        }
         $keyboard.SendKeys('{ENTER}')
         Start-Sleep -Milliseconds $CopyResultWaitMilliseconds
         Assert-MonitorForegroundWindow -WindowHandle $ResolvedWindowHandle
