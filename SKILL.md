@@ -1,6 +1,6 @@
 ---
 name: vscode-remote-runner
-description: Enter one single-line command into the currently selected existing terminal of any visible, already authenticated VS Code Remote SSH window on Windows. Auto-detect SSH windows without hard-coding a username, host, IP address, project, or window title. Use only after an explicit user request. Keep one-shot submission as the default. Enable managed background execution and non-visual result-file polling only when the latest user request explicitly asks for continuous monitoring, babysitting, or staying until completion. Run queries and ordinary launches directly, but paste without Enter and await a second explicit confirmation for deletion, overwrite, process termination, environment modification, or commands containing secrets. Never create or switch terminals, handle authentication, or intervene in ordinary manual terminal use.
+description: Enter one single-line command into the currently selected existing terminal of any visible, already authenticated VS Code Remote SSH window on Windows. Auto-detect SSH windows without hard-coding a username, host, IP address, project, local drive letter, mapped path, or window title. Use only after an explicit user request. Keep one-shot submission as the default. Enable managed background execution and non-visual result-file polling only when the latest user request explicitly asks for continuous monitoring, babysitting, or staying until completion. Run queries and ordinary launches directly, but paste without Enter and await a second explicit confirmation for deletion, overwrite, process termination, environment modification, or commands containing secrets. Never create or switch terminals, handle authentication, or intervene in ordinary manual terminal use.
 ---
 
 # VS Code Remote Runner
@@ -86,7 +86,8 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File "<skill>/scripts/vs
 ## Managed monitoring workflow
 
 1. Confirm that the latest user request passes the monitoring mode gate and that the selected terminal can remain reserved.
-2. For a direct-execution command, start the managed job. Omit `-RunId` to generate one automatically:
+2. Use managed monitoring directly. Do not also create a Codex heartbeat or scheduled automation for the same run unless the user explicitly asks for both.
+3. For a direct-execution command, start the managed job. Omit `-RunId` to generate one automatically:
 
 ```powershell
 powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File "<skill>/scripts/vscode_remote_monitor.ps1" `
@@ -94,7 +95,7 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File "<skill>/scripts/vs
   -Command "<single-line command>"
 ```
 
-3. For a review-required monitored command, prepare without Enter and record the returned `run_id`, `run_dir`, and `window_title`:
+4. For a review-required monitored command, prepare without Enter and record the returned `run_id`, `run_dir`, and `window_title`:
 
 ```powershell
 powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File "<skill>/scripts/vscode_remote_monitor.ps1" `
@@ -102,7 +103,7 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File "<skill>/scripts/vs
   -Command "<single-line command>"
 ```
 
-4. Stop and obtain the required second confirmation. If the exact prepared terminal line is confirmed unchanged, submit it using the same `run_id` and, when needed, the exact `window_title`:
+5. Stop and obtain the required second confirmation. If the exact prepared terminal line is confirmed unchanged, submit it using the same `run_id` and, when needed, the exact `window_title`:
 
 ```powershell
 powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File "<skill>/scripts/vscode_remote_monitor.ps1" `
@@ -110,8 +111,8 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File "<skill>/scripts/vs
   -RunId "<run_id>"
 ```
 
-5. Record the returned `run_id` and `run_dir`. The job runs from the terminal's current remote working directory while its state lives under `~/.codex-runs/<run_id>/`.
-6. Poll only that run:
+6. Record the returned `run_id` and `run_dir`. The job runs from the terminal's current remote working directory while its state lives under `~/.codex-runs/<run_id>/`.
+7. Poll only that run:
 
 ```powershell
 powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File "<skill>/scripts/vscode_remote_monitor.ps1" `
@@ -119,10 +120,12 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File "<skill>/scripts/vs
   -RunId "<run_id>"
 ```
 
-7. Use only the returned `remote_status`, `alive`, `exit_code`, and `log_tail` as evidence. The source of truth is the managed result files, not visible terminal text.
-8. Poll at a task-appropriate interval, normally 15-60 seconds, and keep user updates within the host's commentary cadence. Stop polling when status is `completed` or `failed`, the user asks to stop, the terminal is no longer safely reserved, or the result bridge fails.
-9. Diagnose failures from `log_tail` and the managed files. Do not blindly retry, terminate, or replace the job.
-10. For a localized VS Code UI, pass the localized title of the built-in Copy Last Command Output command through `-CopyCommandLabel` if the English default is not found.
+8. Treat an empty `exit_code` while `remote_status=running` as expected. The file is created only when the managed command exits.
+9. Use only the returned `remote_status`, `alive`, `exit_code`, and `log_tail` as evidence. The source of truth is the managed result files, not visible terminal text.
+   Routine polling returns only the newest log line, capped at 2 KB, to keep terminal output compact. Increase `-TailLines` and `-TailBytes` only for explicit failure diagnosis.
+10. Poll at a task-appropriate interval, normally 15-60 seconds, and keep user updates within the host's commentary cadence. Stop polling when status is `completed` or `failed`, the user asks to stop, the terminal is no longer safely reserved, or the one-shot result bridge fails.
+11. Diagnose failures from `log_tail` and the managed files. Do not blindly rerun the remote poll command, terminate, replace the job, or retry the UI result transfer. Each poll permits exactly one invocation of Copy Last Command Output and validates a unique probe ID so stale clipboard output cannot pass.
+12. For a localized VS Code UI, pass the localized title of the built-in Copy Last Command Output command through `-CopyCommandLabel` if the English default is not found.
 
 ## Behavior
 
@@ -131,9 +134,13 @@ powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -File "<skill>/scripts/vs
 - Focus the selected window's existing `xterm` input control directly through Windows UI Automation. Never create a terminal or switch terminal tabs.
 - In one-shot mode, `Run` pastes and submits, `Paste` does not press Enter, and `Submit` presses Enter without re-pasting.
 - In monitoring mode, `Start` creates a private managed run directory and launches one background runner. `Prepare` pastes the same wrapper without Enter, `Submit` submits that already-prepared wrapper only after confirmation, and `Poll` reads only the managed directory.
+- Managed `Start` and `Prepare` visibly paste a Base64-encoded bootstrap line. It can be long; this is expected transport, not terminal output or a second training launch. The terminal remains reserved until monitoring ends.
+- Before every system-wide keystroke, require the exact recorded VS Code window handle to still be the foreground window. A matching title alone is insufficient. If focus changes, fail immediately and send no further keys.
+- `Poll` includes a fresh probe ID and accepts copied output only when the run ID, probe ID, and both sentinels match. It invokes Copy Last Command Output once and never retries the UI transfer automatically.
 - Never interpret screenshots, terminal layout, scrolling, or visible-page text. The clipboard transfer is only a transport for result-file content and must be restored after every poll.
 - Never open the Command Palette in one-shot mode. Monitoring `Poll` may open it only to invoke Copy Last Command Output; it must not invoke any other command.
 - Every local script invocation is one-shot and exits. Monitoring leaves no local hook, service, or watcher running.
+- Treat drive letters, UNC paths, mounted directories, usernames, hosts, and project paths as per-request runtime values. Never persist environment-specific values in this skill. The selected VS Code Remote SSH server is the authority for commands and results. A local mapping to that same server may be used as a read-only result bridge only when it is supplied or verified at runtime; never assume or hard-code a drive letter or mapped path. Otherwise, read the portable managed result files under the remote user's home directory.
 - Use `-DryRun` to validate arguments and generated metadata without activating a window or sending input.
 
 ## Output strategy

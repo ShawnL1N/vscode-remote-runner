@@ -211,7 +211,10 @@ Managed monitoring:
 4. Writes standard output and standard error to `run.log`.
 5. Periodically submits a polling command for only that `run_id`.
 6. Uses VS Code's built-in Copy Last Command Output capability to transport managed result-file content. It does not use screenshots or visual terminal interpretation.
-7. Stops polling when the status is `completed` or `failed`, the user asks to stop, terminal ownership becomes uncertain, or the result bridge fails.
+7. Gives every poll a fresh probe ID and accepts copied output only when the run ID, probe ID, and both protocol sentinels match.
+8. Invokes Copy Last Command Output exactly once per poll and fails closed instead of retrying an uncertain UI transfer.
+9. Returns only the newest log line, capped at 2 KB by default; larger tails are requested only for explicit failure diagnosis.
+10. Stops polling when the status is `completed` or `failed`, the user asks to stop, terminal ownership becomes uncertain, or the result bridge fails.
 
 The managed run directory contains:
 
@@ -237,6 +240,7 @@ This mode temporarily reserves the selected terminal as a polling channel. Do no
 - It never handles passwords, MFA, security prompts, or privacy prompts.
 - It never treats screenshots, terminal layout, or scrollback as execution evidence.
 - It fails closed when more than one SSH window is available and no target is specified.
+- Before every system-wide keystroke, it verifies that the exact recorded VS Code window handle is still the foreground window; a matching title alone is not enough.
 - It accepts only a single-line command by default.
 - It restores the original clipboard after each operation.
 - High-risk commands require paste-only review and a new explicit confirmation before submission.

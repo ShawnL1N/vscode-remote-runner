@@ -18,6 +18,43 @@ param(
 $ErrorActionPreference = 'Stop'
 $sshWindowPattern = '\[SSH:[^\]]+\].*Visual Studio Code'
 
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class VscodeRemoteForegroundGuard {
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+}
+'@
+
+function Set-VerifiedForegroundWindow {
+    param([IntPtr]$WindowHandle)
+
+    if (-not [VscodeRemoteForegroundGuard]::SetForegroundWindow($WindowHandle)) {
+        throw 'Could not activate the selected VS Code Remote SSH window.'
+    }
+    Start-Sleep -Milliseconds $DelayMilliseconds
+    if ([VscodeRemoteForegroundGuard]::GetForegroundWindow() -ne $WindowHandle) {
+        throw 'The selected VS Code Remote SSH window did not become the foreground window.'
+    }
+}
+
+function Assert-SafeTerminalFocus {
+    param([IntPtr]$WindowHandle)
+
+    if ([VscodeRemoteForegroundGuard]::GetForegroundWindow() -ne $WindowHandle) {
+        throw 'Foreground-window ownership changed before terminal input. Nothing was sent.'
+    }
+    $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+    if ($null -eq $focused -or $focused.Current.ClassName -ne 'xterm-helper-textarea') {
+        throw 'The existing terminal input lost focus before input. Nothing was sent.'
+    }
+}
+
 function Get-VSCodeSshWindows {
     @(Get-Process -ErrorAction SilentlyContinue |
         Where-Object {
@@ -93,15 +130,12 @@ if ($WindowTitle) {
 }
 
 $resolvedWindowTitle = $selectedWindow.MainWindowTitle
+$resolvedWindowHandle = [IntPtr]$selectedWindow.MainWindowHandle
 $keyboard = New-Object -ComObject WScript.Shell
-if (-not $keyboard.AppActivate($resolvedWindowTitle)) {
-    throw 'Could not activate the selected VS Code Remote SSH window.'
-}
-
-Start-Sleep -Milliseconds $DelayMilliseconds
+Set-VerifiedForegroundWindow -WindowHandle $resolvedWindowHandle
 Add-Type -AssemblyName UIAutomationClient
 $root = [System.Windows.Automation.AutomationElement]::FromHandle(
-    [IntPtr]$selectedWindow.MainWindowHandle
+    $resolvedWindowHandle
 )
 $terminalCondition = New-Object System.Windows.Automation.PropertyCondition -ArgumentList @(
     [System.Windows.Automation.AutomationElement]::ClassNameProperty,
@@ -124,22 +158,22 @@ if ($null -eq $terminalInput) {
 }
 $terminalInput.SetFocus()
 Start-Sleep -Milliseconds $DelayMilliseconds
-$focusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
-if ($focusedElement.Current.ClassName -ne 'xterm-helper-textarea') {
-    throw 'The existing terminal input could not be focused safely.'
-}
+Assert-SafeTerminalFocus -WindowHandle $resolvedWindowHandle
 
 Add-Type -AssemblyName System.Windows.Forms
 $originalClipboard = [System.Windows.Forms.Clipboard]::GetDataObject()
 try {
     if ($Action -eq 'Submit') {
+        Assert-SafeTerminalFocus -WindowHandle $resolvedWindowHandle
         $keyboard.SendKeys('{ENTER}')
         Start-Sleep -Milliseconds $DelayMilliseconds
     } else {
         [System.Windows.Forms.Clipboard]::SetText($Command)
+        Assert-SafeTerminalFocus -WindowHandle $resolvedWindowHandle
         $keyboard.SendKeys('^v')
         Start-Sleep -Milliseconds $DelayMilliseconds
         if ($Action -eq 'Run') {
+            Assert-SafeTerminalFocus -WindowHandle $resolvedWindowHandle
             $keyboard.SendKeys('{ENTER}')
             Start-Sleep -Milliseconds $DelayMilliseconds
         }
@@ -156,6 +190,7 @@ try {
     status = if ($Action -eq 'Paste') { 'pasted_not_submitted' } else { 'submitted' }
     action = $Action
     window_title = $resolvedWindowTitle
+    window_handle = $resolvedWindowHandle.ToInt64()
     terminal_mode = 'existing_only'
     command_length = if ($null -eq $Command) { 0 } else { $Command.Length }
 } | ConvertTo-Json -Compress
