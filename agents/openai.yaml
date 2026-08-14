@@ -1,0 +1,6 @@
+interface:
+  display_name: "VS Code Remote Runner"
+  short_description: "Run or explicitly monitor VS Code SSH commands"
+  default_prompt: "Use $vscode-remote-runner to run a command in my current VS Code Remote SSH terminal, enabling monitoring only when I explicitly request it."
+policy:
+  allow_implicit_invocation: false
