@@ -10,10 +10,16 @@ param(
     [string]$WindowTitle,
 
     [ValidateRange(512, 65536)]
-    [int]$TailBytes = 16384,
+    [int]$TailBytes = 2048,
+
+    [ValidateRange(1, 200)]
+    [int]$TailLines = 1,
 
     [ValidateRange(500, 10000)]
     [int]$ProbeWaitMilliseconds = 1500,
+
+    [ValidateRange(500, 5000)]
+    [int]$CopyResultWaitMilliseconds = 1500,
 
     [string]$CopyCommandLabel = 'Terminal: Copy Last Command Output',
 
@@ -25,6 +31,39 @@ $terminalScript = Join-Path $PSScriptRoot 'vscode_remote_terminal.ps1'
 $runIdPattern = '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
 $sshWindowPattern = '\[SSH:[^\]]+\].*Visual Studio Code'
 
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class VscodeRemoteMonitorForegroundGuard {
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+}
+'@
+
+function Set-VerifiedMonitorForegroundWindow {
+    param([IntPtr]$WindowHandle)
+
+    if (-not [VscodeRemoteMonitorForegroundGuard]::SetForegroundWindow($WindowHandle)) {
+        throw 'Could not activate the monitored VS Code Remote SSH window.'
+    }
+    Start-Sleep -Milliseconds 300
+    if ([VscodeRemoteMonitorForegroundGuard]::GetForegroundWindow() -ne $WindowHandle) {
+        throw 'The monitored VS Code Remote SSH window did not become the foreground window.'
+    }
+}
+
+function Assert-MonitorForegroundWindow {
+    param([IntPtr]$WindowHandle)
+
+    if ([VscodeRemoteMonitorForegroundGuard]::GetForegroundWindow() -ne $WindowHandle) {
+        throw 'Foreground-window ownership changed during result retrieval. No further keys were sent.'
+    }
+}
+
 function ConvertTo-Base64Utf8 {
     param([string]$Text)
 
@@ -34,6 +73,10 @@ function ConvertTo-Base64Utf8 {
 function New-MonitorRunId {
     $suffix = [Guid]::NewGuid().ToString('N').Substring(0, 8)
     'run_{0}_{1}' -f (Get-Date -Format 'yyyyMMdd_HHmmss'), $suffix
+}
+
+function New-MonitorProbeId {
+    'probe_{0}' -f [Guid]::NewGuid().ToString('N').Substring(0, 12)
 }
 
 function New-StartCommand {
@@ -90,13 +133,19 @@ exit "$rc"
 function New-PollCommand {
     param(
         [string]$Id,
-        [int]$Bytes
+        [string]$ProbeId,
+        [int]$Bytes,
+        [int]$Lines
     )
 
     $template = @'
-run_id='__RUN_ID__'; run_dir="$HOME/.codex-runs/$run_id"; if [ ! -d "$run_dir" ]; then printf '__CODEX_MONITOR_V1__\nrun_id=%s\nstatus=missing\npid=\nalive=0\nexit_code=\nlog_b64=\n__CODEX_MONITOR_END__\n' "$run_id"; else monitor_status="$(tr -d '\r\n' < "$run_dir/status" 2>/dev/null)"; monitor_pid="$(tr -d '\r\n' < "$run_dir/pid" 2>/dev/null)"; monitor_exit="$(tr -d '\r\n' < "$run_dir/exit_code" 2>/dev/null)"; monitor_alive=0; if [ -n "$monitor_pid" ] && kill -0 "$monitor_pid" 2>/dev/null; then monitor_alive=1; fi; monitor_log="$(tail -c __TAIL_BYTES__ "$run_dir/run.log" 2>/dev/null | base64 | tr -d '\r\n')"; printf '__CODEX_MONITOR_V1__\nrun_id=%s\nstatus=%s\npid=%s\nalive=%s\nexit_code=%s\nlog_b64=%s\n__CODEX_MONITOR_END__\n' "$run_id" "$monitor_status" "$monitor_pid" "$monitor_alive" "$monitor_exit" "$monitor_log"; fi
+run_id='__RUN_ID__'; probe_id='__PROBE_ID__'; run_dir="$HOME/.codex-runs/$run_id"; read_compact() { if [ -f "$1" ]; then tr -d '\r\n' < "$1"; fi; }; if [ ! -d "$run_dir" ]; then printf '__CODEX_MONITOR_V1__\nrun_id=%s\nprobe_id=%s\nstatus=missing\npid=\nalive=0\nexit_code=\nlog_b64=\n__CODEX_MONITOR_END__\n' "$run_id" "$probe_id"; else monitor_status="$(read_compact "$run_dir/status")"; monitor_pid="$(read_compact "$run_dir/pid")"; monitor_exit="$(read_compact "$run_dir/exit_code")"; monitor_alive=0; if [ -n "$monitor_pid" ] && ps -p "$monitor_pid" -o pid= >/dev/null 2>&1; then monitor_alive=1; fi; monitor_log=''; if [ -f "$run_dir/run.log" ]; then monitor_log="$(tail -n __TAIL_LINES__ "$run_dir/run.log" 2>/dev/null | tail -c __TAIL_BYTES__ | base64 | tr -d '\r\n')"; fi; printf '__CODEX_MONITOR_V1__\nrun_id=%s\nprobe_id=%s\nstatus=%s\npid=%s\nalive=%s\nexit_code=%s\nlog_b64=%s\n__CODEX_MONITOR_END__\n' "$run_id" "$probe_id" "$monitor_status" "$monitor_pid" "$monitor_alive" "$monitor_exit" "$monitor_log"; fi
 '@
-    $template.Replace('__RUN_ID__', $Id).Replace('__TAIL_BYTES__', [string]$Bytes).Trim()
+    $template.Replace('__RUN_ID__', $Id).
+        Replace('__PROBE_ID__', $ProbeId).
+        Replace('__TAIL_LINES__', [string]$Lines).
+        Replace('__TAIL_BYTES__', [string]$Bytes).
+        Trim()
 }
 
 function Invoke-TerminalCommand {
@@ -120,12 +169,18 @@ function Invoke-TerminalCommand {
 }
 
 function Copy-LastCommandOutput {
-    param([string]$ResolvedWindowTitle)
+    param(
+        [string]$ResolvedWindowTitle,
+        [IntPtr]$ResolvedWindowHandle,
+        [string]$ExpectedRunId,
+        [string]$ExpectedProbeId
+    )
 
     $selectedWindow = Get-Process -ErrorAction SilentlyContinue |
         Where-Object {
             $_.MainWindowHandle -ne 0 -and
             $_.ProcessName -like 'Code*' -and
+            [IntPtr]$_.MainWindowHandle -eq $ResolvedWindowHandle -and
             $_.MainWindowTitle -eq $ResolvedWindowTitle -and
             $_.MainWindowTitle -match $sshWindowPattern
         } |
@@ -134,22 +189,35 @@ function Copy-LastCommandOutput {
         throw 'The monitored VS Code Remote SSH window is no longer visible.'
     }
 
-    $keyboard = New-Object -ComObject WScript.Shell
-    if (-not $keyboard.AppActivate($ResolvedWindowTitle)) {
-        throw 'Could not reactivate the monitored VS Code Remote SSH window.'
-    }
+    Set-VerifiedMonitorForegroundWindow -WindowHandle $ResolvedWindowHandle
 
     Add-Type -AssemblyName System.Windows.Forms
     $originalClipboard = [System.Windows.Forms.Clipboard]::GetDataObject()
+    $copiedOutput = $null
+    $runPattern = '(?m)^run_id=' + [regex]::Escape($ExpectedRunId) + '\r?$'
+    $probePattern = '(?m)^probe_id=' + [regex]::Escape($ExpectedProbeId) + '\r?$'
+    $keyboard = New-Object -ComObject WScript.Shell
     try {
         [System.Windows.Forms.Clipboard]::SetText($CopyCommandLabel)
+        Assert-MonitorForegroundWindow -WindowHandle $ResolvedWindowHandle
         $keyboard.SendKeys('{F1}')
-        Start-Sleep -Milliseconds 400
-        $keyboard.SendKeys('^v')
         Start-Sleep -Milliseconds 500
+        Assert-MonitorForegroundWindow -WindowHandle $ResolvedWindowHandle
+        $keyboard.SendKeys('^v')
+        Start-Sleep -Milliseconds 700
+        Assert-MonitorForegroundWindow -WindowHandle $ResolvedWindowHandle
         $keyboard.SendKeys('{ENTER}')
-        Start-Sleep -Milliseconds 900
-        $copiedOutput = [System.Windows.Forms.Clipboard]::GetText()
+        Start-Sleep -Milliseconds $CopyResultWaitMilliseconds
+        Assert-MonitorForegroundWindow -WindowHandle $ResolvedWindowHandle
+        $candidate = [System.Windows.Forms.Clipboard]::GetText()
+        if (
+            $candidate -match '__CODEX_MONITOR_V1__' -and
+            $candidate -match '__CODEX_MONITOR_END__' -and
+            $candidate -match $runPattern -and
+            $candidate -match $probePattern
+        ) {
+            $copiedOutput = $candidate
+        }
     } finally {
         if ($null -ne $originalClipboard) {
             [System.Windows.Forms.Clipboard]::SetDataObject($originalClipboard, $true)
@@ -158,10 +226,13 @@ function Copy-LastCommandOutput {
         }
     }
 
-    if ($copiedOutput -notmatch '__CODEX_MONITOR_V1__') {
-        throw 'The non-visual result bridge did not receive the monitor sentinel. Check VS Code shell integration or CopyCommandLabel.'
+    if ($null -eq $copiedOutput) {
+        throw 'The one-shot result bridge did not receive the current monitor probe. It will not retry automatically.'
     }
-    $copiedOutput
+    [pscustomobject]@{
+        Text = $copiedOutput
+        Attempt = 1
+    }
 }
 
 if (-not $Action) {
@@ -191,7 +262,8 @@ if ($Action -in @('Start', 'Prepare')) {
     if ($Command) {
         throw 'Poll accepts no Command.'
     }
-    $remoteCommand = New-PollCommand -Id $RunId -Bytes $TailBytes
+    $probeId = New-MonitorProbeId
+    $remoteCommand = New-PollCommand -Id $RunId -ProbeId $probeId -Bytes $TailBytes -Lines $TailLines
 } else {
     if ($Command) {
         throw 'Submit accepts no Command.'
@@ -207,6 +279,8 @@ if ($DryRun) {
         run_dir = "~/.codex-runs/$RunId"
         window_selector = if ($WindowTitle) { $WindowTitle } else { 'auto-detect-ssh' }
         remote_command_length = if ($null -eq $remoteCommand) { 0 } else { $remoteCommand.Length }
+        tail_lines = $TailLines
+        tail_bytes = $TailBytes
         input_sent = $false
     } | ConvertTo-Json -Compress
     exit 0
@@ -257,7 +331,12 @@ if ($Action -eq 'Start') {
 }
 
 Start-Sleep -Milliseconds $ProbeWaitMilliseconds
-$copiedOutput = Copy-LastCommandOutput -ResolvedWindowTitle $receipt.window_title
+$copyResult = Copy-LastCommandOutput `
+    -ResolvedWindowTitle $receipt.window_title `
+    -ResolvedWindowHandle ([IntPtr][int64]$receipt.window_handle) `
+    -ExpectedRunId $RunId `
+    -ExpectedProbeId $probeId
+$copiedOutput = $copyResult.Text
 $match = [regex]::Match(
     $copiedOutput,
     '(?s)__CODEX_MONITOR_V1__\r?\n(?<body>.*?)\r?\n__CODEX_MONITOR_END__'
@@ -294,6 +373,7 @@ if ($fields.exit_code -match '^-?\d+$') {
     status = 'polled'
     action = 'Poll'
     run_id = $fields.run_id
+    probe_id = $fields.probe_id
     run_dir = "~/.codex-runs/$RunId"
     remote_status = $fields.status
     pid = $fields.pid
@@ -301,5 +381,6 @@ if ($fields.exit_code -match '^-?\d+$') {
     exit_code = $exitCode
     log_tail = $logTail
     evidence_source = 'managed_result_files'
+    copy_attempt = $copyResult.Attempt
     window_title = $receipt.window_title
 } | ConvertTo-Json -Depth 4 -Compress
