@@ -1,5 +1,10 @@
 # VS Code Remote Runner
 
+<p align="right">
+  <strong>English</strong> ·
+  <a href="./README.zh-CN.md">简体中文</a>
+</p>
+
 `vscode-remote-runner` lets local Codex enter a command into an already authenticated VS Code Remote SSH terminal after an explicit user request. It does not establish its own SSH connection or obtain the server password or private key.
 
 The current version supports two modes:
